@@ -293,7 +293,7 @@ int32_t write_matched_particles(char *foutbase, part_t matched_particles, int64_
   double *buffer_array_double;
   double **buffer_array_multi;
 
-  hid_t       file_id, dataset_id, dataspace_id, group_id, datatype;  /* identifiers */
+  hid_t       file_id, dataset_id, dataspace_id, group_id, attribute_id, datatype;  /* identifiers */
   hsize_t     dims[2];
   herr_t      status;
 
@@ -394,8 +394,26 @@ int32_t write_matched_particles(char *foutbase, part_t matched_particles, int64_
   status = H5Dclose(dataset_id); 
   status = H5Sclose(dataspace_id); 
 
-  // Better free everything!
+  status = H5Gclose(group_id);
+  // All the data written, create some attributes //
+
+  hid_t hdf5_dataspace, hdf5_attribute, hdf5_headergrp;
+
+  hdf5_headergrp = H5Gcreate(file_id, "/Header", 0, H5P_DEFAULT, H5P_DEFAULT);
+
+  int tmp = num_snapshot_files;
  
+  hdf5_dataspace = H5Screate(H5S_SCALAR);
+  hdf5_attribute = H5Acreate(hdf5_headergrp, "NumFilesPerSnapshot", H5T_NATIVE_INT, hdf5_dataspace, H5P_DEFAULT, H5P_DEFAULT);
+  H5Awrite(hdf5_attribute, H5T_NATIVE_INT, &tmp);
+  H5Aclose(hdf5_attribute);
+  H5Sclose(hdf5_dataspace);
+
+  status = H5Gclose(hdf5_headergrp);
+
+  // Better free everything!
+
+  status = H5Fclose(file_id);
 
   free(buffer_array_multi[0]);
   free(buffer_array_multi);
