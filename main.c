@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 #include <assert.h>
 
+#include <hdf5.h>
 #ifdef MPI
 #include <mpi.h>
 #endif
@@ -212,9 +213,197 @@ int32_t read_match_ids(char *fin_base, int32_t i_file, int64_t *match_ids)
 
 }
 
-void match_particles(int64_t *match_ids, part_t snapshot_particles_local, part_t matched_particles)
+void match_particles(int64_t *match_ids, int64_t N_match_ids, part_t snapshot_particles, part_t matched_particles, int64_t *offset)
 {
-printf("HELLO\n");
+  // Here match_ids is the sorted list of particle IDs that we want to find in the snapshot particle struct.
+  // Since match_ids is sorted we will iterate over every particle in the snapshot and search for a match in match_ids. 
+
+  int32_t is_found;
+  int64_t count, search_idx, snapshot_particle_idx, particle_idx;
+
+  printf("We are performing matching over %ld particles\n", snapshot_particles->NumParticles_Total[1]);
+  // Since the snapshot_particles contain ALL particle types we will only loop over the halo particles (particle type 1).
+  for (snapshot_particle_idx = snapshot_particles->NumParticles_Total[0]; snapshot_particle_idx < (snapshot_particles->NumParticles_Total[0] + snapshot_particles->NumParticles_Total[1]); ++snapshot_particle_idx) 
+  {
+    if ((snapshot_particle_idx - snapshot_particles->NumParticles_Total[0]) %  (int64_t) (1e6) == 0)
+    {
+      printf("%.2f%% done\n", (float) (snapshot_particle_idx - snapshot_particles->NumParticles_Total[0]) / (float) (snapshot_particles->NumParticles_Total[1]) * 100.0); 
+    } 
+    is_found = 0; // Tracks when (if) we find the particle.
+    count = 0;
+    search_idx = ceil(N_match_ids / 2.0); // This is where we start our search in the match IDs array. 
+    particle_idx = snapshot_particles->ID[snapshot_particle_idx];  
+ 
+    // We now search through the match IDs for the snapshot particle ID.
+    // Since the match IDs is sorted, we start at the middle of the match list. Depending if the match ID is smaller/larger than the snapshot ID, we multiply the search index by 0.5 or 1.5 
+    // This method is faster than a simple N^2 search.
+
+    while (is_found == 0) 
+    {
+      ++count;
+      if (particle_idx == match_ids[search_idx]) 
+      {
+        is_found = 1;
+      }
+      else if (N_match_ids / pow(2, count) < 1.0) // The smallest index movement is less than 1.  The snapshot ID isn'in the the match list! 
+      {
+        break;
+      } 
+      else if (particle_idx > match_ids[search_idx]) // The snapshot ID is larger than the match ID, move down the list. 
+      {
+        search_idx = search_idx + ceil(N_match_ids / pow(2, count + 1));
+      }
+      else
+      {
+        search_idx = search_idx - ceil(N_match_ids / pow(2, count + 1)); // The snapshot ID is smaller than the match ID, move up the list. 
+      }
+
+      if (search_idx >= N_match_ids) // Fix edge case.
+      {
+        search_idx = N_match_ids -1;
+      }
+     
+    }
+    if (is_found == 1) // We found the particle so copy its properties over.
+    {
+      matched_particles->ID[*offset] = snapshot_particles->ID[snapshot_particle_idx]; 
+      matched_particles->mass[*offset] = snapshot_particles->mass[snapshot_particle_idx]; 
+
+      matched_particles->posx[*offset] = snapshot_particles->posx[snapshot_particle_idx]; 
+      matched_particles->posy[*offset] = snapshot_particles->posy[snapshot_particle_idx]; 
+      matched_particles->posz[*offset] = snapshot_particles->posz[snapshot_particle_idx]; 
+
+      matched_particles->vx[*offset] = snapshot_particles->vx[snapshot_particle_idx]; 
+      matched_particles->vy[*offset] = snapshot_particles->vy[snapshot_particle_idx]; 
+      matched_particles->vz[*offset] = snapshot_particles->vz[snapshot_particle_idx]; 
+
+      ++(*offset);
+    }
+ 
+  }
+
+  printf("Found %ld matching particles\n", *offset);
+}
+
+int32_t write_matched_particles(char *foutbase, part_t matched_particles, int64_t offset, int32_t snapshot_file_idx)
+{
+
+  char fname[1024];
+  int64_t *buffer_array_long, i;
+  double *buffer_array_double;
+  double **buffer_array_multi;
+
+  hid_t       file_id, dataset_id, dataspace_id, group_id, datatype;  /* identifiers */
+  hsize_t     dims[2];
+  herr_t      status;
+
+  snprintf(fname, 1024, "%s.%d.hdf5", foutbase, snapshot_file_idx);
+
+  file_id = H5Fcreate(fname, H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
+  if (file_id == -1)
+  {
+    fprintf(stderr, "Cannot open file %s for writing\n", fname);
+    return EXIT_FAILURE;  
+  }
+
+  dims[0] = offset; // This is the number of particles we are writing.
+
+  buffer_array_long = malloc(sizeof(int64_t) * offset);
+  if (buffer_array_long == NULL)
+  {
+    fprintf(stderr, "Cannot allocate memory for buffer array long\n");
+    return EXIT_FAILURE;
+  }
+ 
+  buffer_array_double = malloc(sizeof(double) * offset);
+  if (buffer_array_double == NULL)
+  {
+    fprintf(stderr, "Cannot allocate memory for buffer array double\n");
+    return EXIT_FAILURE;
+  }
+
+  buffer_array_multi = (double **)malloc(sizeof(double *) * offset); // Malloc the top level array.
+  buffer_array_multi[0] = (double *)malloc(sizeof(double) * offset *3); // Then allocate a contiguous block of memory for the particles.
+
+  for (i = 1; i < offset; ++i) buffer_array_multi[i] = buffer_array_multi[0]+ i*3;
+
+  group_id = H5Gcreate2(file_id, "/PartType1", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+ 
+  // Let's start with the particle IDs //
+
+  for (i = 0; i < offset; ++i)
+  {
+    buffer_array_long[i] = matched_particles->ID[i];
+    printf("%ld\n", buffer_array_long[i]);
+  } 
+
+  dataspace_id = H5Screate_simple(1, &dims[0], NULL); // Creates the dataspace.
+
+  dataset_id = H5Dcreate2(file_id, "/PartType1/ParticleIDs", H5T_NATIVE_LONG, dataspace_id, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT); // Create the dataset inside the group. 
+  status = H5Dwrite(dataset_id, H5T_NATIVE_LONG, H5S_ALL, H5S_ALL, H5P_DEFAULT, buffer_array_long); // Then write the particle IDs.
+  status = H5Dclose(dataset_id); // End access to the dataset and release resources used by it.
+  status = H5Sclose(dataspace_id); // Terminate access to the data space.
+
+  printf("Successfully wrote the particle IDs.\n");
+
+  // Position //
+
+  for (i = 0; i < offset; ++i)
+  {
+    buffer_array_multi[i][0] = matched_particles->posx[i];
+    buffer_array_multi[i][1] = matched_particles->posy[i];
+    buffer_array_multi[i][2] = matched_particles->posz[i];
+
+    printf("x = %.4f \t y = %.4f \t z = %.4f\n", buffer_array_multi[i][0], buffer_array_multi[i][1], buffer_array_multi[i][2]);
+
+  } 
+
+  dims[1] = 3; 
+  dataspace_id = H5Screate_simple(2, dims, NULL); 
+
+  datatype = H5Tcopy(H5T_NATIVE_DOUBLE);
+  status = H5Tset_order(datatype, H5T_ORDER_LE); 
+
+  dataset_id = H5Dcreate2(file_id, "/PartType1/Coordinates", datatype, dataspace_id, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT); 
+  status = H5Dwrite(dataset_id, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, &buffer_array_multi[0][0]); 
+  status = H5Dclose(dataset_id); 
+  status = H5Sclose(dataspace_id); 
+
+  printf("Successfully wrote the particle positions.\n");
+
+  // Velocity //
+ 
+  for (i = 0; i < offset; ++i)
+  {
+    buffer_array_multi[i][0] = matched_particles->vx[i];
+    buffer_array_multi[i][1] = matched_particles->vy[i];
+    buffer_array_multi[i][2] = matched_particles->vz[i];
+
+    printf("x = %.4f \t y = %.4f \t z = %.4f\n", buffer_array_multi[i][0], buffer_array_multi[i][1], buffer_array_multi[i][2]);
+
+  } 
+
+  dims[1] = 3; 
+  dataspace_id = H5Screate_simple(2, dims, NULL); // Creates the dataspace.
+
+  datatype = H5Tcopy(H5T_NATIVE_DOUBLE);
+  status = H5Tset_order(datatype, H5T_ORDER_LE); 
+
+  dataset_id = H5Dcreate2(file_id, "/PartType1/Velocities", datatype, dataspace_id, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT); 
+  status = H5Dwrite(dataset_id, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, &buffer_array_multi[0][0]); 
+  status = H5Dclose(dataset_id); 
+  status = H5Sclose(dataspace_id); 
+
+  // Better free everything!
+ 
+
+  free(buffer_array_multi[0]);
+  free(buffer_array_multi);
+  free(buffer_array_double);
+  free(buffer_array_long);
+
+  return EXIT_SUCCESS; 
+
 }
 
 int main(int argc, char **argv)
@@ -222,7 +411,9 @@ int main(int argc, char **argv)
 
   char buf[1024];
   int32_t status, snapshot_file_idx, match_file_idx;
-
+  
+  int64_t offset;
+  
   int32_t N_match_ids_highword, header_match_file_idx;
   int64_t N_match_ids_thisfile, N_match_ids_total;
   int64_t *match_ids;
@@ -267,7 +458,8 @@ int main(int argc, char **argv)
 #else
   for (snapshot_file_idx = 0; snapshot_file_idx < num_snapshot_files; ++snapshot_file_idx)
 #endif 
-  {  
+  { 
+    offset = 0; // Offset for slicing in matched properties from each match ID subfile. 
     part_t snapshot_particles_local;
     snapshot_particles_local = malloc(sizeof(struct particle_struct));
 
@@ -296,8 +488,8 @@ int main(int argc, char **argv)
     allocate_particle_memory(matched_particles, matched_particles->NumParticles_Total_AllType);
  
     // Now we have the particles for the snapshot allocated, let's read in the match IDs and start matching! //
-        
-    num_match_files = 1; 
+    
+    num_match_files = 1;
     for (match_file_idx = 0; match_file_idx < num_match_files; ++match_file_idx)
     { 
       snprintf(buf, 1024, "%s.%d", fin_ids, match_file_idx);
@@ -321,9 +513,15 @@ int main(int argc, char **argv)
       printf("Read in %ld match IDs now sorting them\n", N_match_ids_thisfile);
       qsort(match_ids, N_match_ids_thisfile, sizeof(int64_t), cmpfunc);
 
-      match_particles(match_ids, snapshot_particles_local, matched_particles);
+      match_particles(match_ids, N_match_ids_thisfile, snapshot_particles_local, matched_particles, &offset);
       free(match_ids); 
 
+    }
+
+    status = write_matched_particles(foutbase, matched_particles, offset, snapshot_file_idx);
+    if (status == EXIT_FAILURE)
+    {
+      exit(EXIT_FAILURE);
     }
 
     free_localparticles(&matched_particles);
