@@ -30,10 +30,11 @@
 // Local Variables //
 
 char *fin_ids, *fin_snapshot, *foutbase;
-int32_t num_snapshot_files, num_match_files;
+int32_t num_snapshot_files, num_fof_files;
 
+int32_t ThisTask, NTask;
 #ifdef MPI
-int ThisTask, NTask, nodeNameLen;
+int32_t nodeNameLen;
 char *ThisNode;
 #endif
 
@@ -42,8 +43,12 @@ char *ThisNode;
 int32_t parse_params(int32_t argc, char **argv);
 int32_t init();
 int32_t read_match_header(char *fname, int32_t *N_files, int32_t *i_file, int64_t *ids_ThisFile, int64_t *ids_Total, int32_t *ids_Total_HighWord);
-int32_t get_num_match_files(char *fin_ids, int32_t *num_match_files);
 int32_t write_hdf5_header(hid_t group_id, int64_t NumPart, int64_t N_match_ids_total, int32_t snapshot_file_idx);
+int32_t read_fof_ids_ThisTask(char *fin_base, int32_t ThisTask, int32_t NTask, int64_t **fof_ids_ThisTask, int64_t *N_fof_ids_ThisTask, int64_t *N_fof_ids_AllTask);
+int32_t determine_N_fof_ids_ThisTask(char *fin_ids, int32_t ThisTask, int32_t NTask, int64_t *N_fof_ids_thistask);
+int32_t read_fof_ids(char *fin_base, int32_t i_file, int64_t **fof_ids, int64_t *Nids_ThisFile, int64_t *Nids_AllFile);
+int32_t write_matched_particles(part_t matched_particles, int64_t NumPart, int64_t N_match_ids_total, int32_t snapshot_file_idx, int32_t ThisTask);
+
 // Functions //
 
 void bye()
@@ -53,26 +58,38 @@ void bye()
   free(ThisNode);
 #endif
 }
+static __inline int simple_cmp(const void *a, const void *b) {
+  const int64_t da = *((const int64_t *) a);
+  const int64_t db = *((const int64_t *) b);
+  return (da < db) ? -1 : (da == db) ? 0 : 1;
+}
 
-int cmpfunc (const void * a, const void * b) {
-   return ( *(int64_t*)a - *(int64_t*)b );
+
+int32_t cmpfunc (const void * a, const void * b) {
+  if ( *(int64_t*)a - *(int64_t*)b < 0);
+    return -1;
+  if ( *(int64_t*)a - *(int64_t*)b > 0);
+    return -1;
+  return 0;
 }
 
 int32_t parse_params(int32_t argc, char **argv)
 {
 
-  if (argc != 4)
+  if (argc != 5)
   {
-    fprintf(stderr, "Usage : ./particle_linker <Input Particle ID Base> <Input Snapshot Base> <Output Base>\n"); 
+    fprintf(stderr, "This is the version of the particle linker that will link the FoF particles for the Kali simulation.\n");
+    fprintf(stderr, "Usage : ./kali_linker <FoF IDs Base> <Number of FoF IDs Subfiles> <Kali Snapshot Base> <Output Base>\n"); 
     return EXIT_FAILURE; 
   }
 
   fin_ids = strdup(argv[1]);
-  fin_snapshot = strdup(argv[2]);
-  foutbase = strdup(argv[3]); 
+  num_fof_files = atoi(argv[2]);
+  fin_snapshot = strdup(argv[3]);
+  foutbase = strdup(argv[4]); 
 
   printf("==================================================\n");
-  printf("Running with parameters :\nIDs to Match : %s\nInput Snapshot : %s\nOutput Path : %s\n", fin_ids, fin_snapshot, foutbase);
+  printf("Running with parameters :\nFoF IDs : %s\nNumber of FoF IDs Subfiles : %d\nInput Snapshot : %s\nOutput Path : %s\n", fin_ids, num_fof_files, fin_snapshot, foutbase);
   printf("==================================================\n\n");
 
   return EXIT_SUCCESS;
@@ -110,14 +127,6 @@ int32_t init()
 
   printf("Snapshot particles are split up over %d files\n", num_snapshot_files);
 
-  status = get_num_match_files(fin_ids, &num_match_files);
-  if (status == EXIT_FAILURE)
-  {
-   return EXIT_FAILURE; 
-  }
-
-  printf("The match IDs are split up over %d files\n", num_match_files);
-
   return EXIT_SUCCESS;
 
 }
@@ -142,32 +151,6 @@ int32_t read_match_header(char *fname, int32_t *i_file, int32_t *N_files, int64_
 
   fclose(header_file);
 
-  return EXIT_SUCCESS;
-
-}
-
-int32_t get_num_match_files(char *fin_base, int32_t *num_match_files)
-{
-
-  char fname[1024];
-  int32_t i_file, ids_Total_HighWord;
-  int64_t ids_ThisFile, ids_Total; 
-
-  int32_t status;
-
-  snprintf(fname, 1024, "%s.0", fin_ids);
-  if (access(fname, F_OK) == -1)
-  {
-    fprintf(stderr, "Could not find file %s\n", fname);
-    return EXIT_FAILURE;
-  }
-  
-  status = read_match_header(fname, &i_file, num_match_files, &ids_ThisFile, &ids_Total, &ids_Total_HighWord); 
-  if (status == EXIT_FAILURE)
-  {
-    return EXIT_FAILURE;
-  }
-  
   return EXIT_SUCCESS;
 
 }
@@ -229,6 +212,7 @@ void match_particles(int64_t *match_ids, int64_t N_match_ids, part_t snapshot_pa
   // Since the snapshot_particles contain ALL particle types we will only loop over the halo particles (particle type 1).
   for (snapshot_particle_idx = snapshot_particles->NumParticles_Total[0]; snapshot_particle_idx < (snapshot_particles->NumParticles_Total[0] + snapshot_particles->NumParticles_Total[1]); ++snapshot_particle_idx) 
   {
+   
 #ifdef SHOW_MATCH_PROGRESS
     if ((snapshot_particle_idx - snapshot_particles->NumParticles_Total[0]) %  (int64_t) (1e6) == 0)
     {
@@ -240,13 +224,45 @@ void match_particles(int64_t *match_ids, int64_t N_match_ids, part_t snapshot_pa
     search_idx = ceil(N_match_ids / 2.0); // This is where we start our search in the match IDs array. 
     particle_idx = snapshot_particles->ID[snapshot_particle_idx];  
  
-    // We now search through the match IDs for the snapshot particle ID.
-    // Since the match IDs is sorted, we start at the middle of the match list. Depending if the match ID is smaller/larger than the snapshot ID, we multiply the search index by 0.5 or 1.5 
+    // We now search through the FoF IDs for the snapshot particle ID.
+    // Since the FoF IDs are sorted, we start at the middle of the FoF list. Depending if the FoF ID is smaller/larger than the snapshot ID, we multiply the search index by 0.5 or 1.5 
     // This method is faster than a simple N^2 search.
 
+    /*
+    if (particle_idx == 7805847370)
+    {
+      printf("The particle with ID 7805847370 is now.\n");
+      extra_info = 1;
+      extra_info = 0;
+      
+      for (manual_idx = 0; manual_idx < N_match_ids; ++manual_idx)
+      {
+        if (match_ids[manual_idx] == 7805847370)
+        {
+          printf("Manual_idx = %ld\n", manual_idx);
+
+        }
+        if (match_ids[manual_idx] > 7805847370)
+        {
+          printf("Have gone past 7805847370 at manual_idx = %ld. match_ids[manual_idx] = %ld\n", manual_idx, match_ids[manual_idx]);
+        }
+      }
+     
+    }
+    */
     while (is_found == 0) 
     {
+
       ++count;
+
+      /*
+      if (extra_info == 1)
+      {
+        printf("%ld\n", match_ids[59189]);
+        printf("search_idx = %ld, match_ids[search_idx] = %ld, N_match_ids = %ld, count = %ld, N_match_ids / pow(2,count) = %.4f\n", search_idx, match_ids[search_idx], N_match_ids, count, N_match_ids / pow(2,count));
+      }
+      */
+
       if (particle_idx == match_ids[search_idx]) 
       {
         is_found = 1;
@@ -265,13 +281,20 @@ void match_particles(int64_t *match_ids, int64_t N_match_ids, part_t snapshot_pa
       }
 
       if (search_idx >= N_match_ids) // Fix edge case.
-      {
+      {        
         search_idx = N_match_ids -1;
+      }      
+    
+      if (search_idx < 0)
+      {
+        search_idx = 0;
       }
-     
+ 
     }
+        
     if (is_found == 1) // We found the particle so copy its properties over.
     {
+
       matched_particles->ID[*offset] = snapshot_particles->ID[snapshot_particle_idx]; 
       matched_particles->mass[*offset] = snapshot_particles->mass[snapshot_particle_idx]; 
 
@@ -284,14 +307,15 @@ void match_particles(int64_t *match_ids, int64_t N_match_ids, part_t snapshot_pa
       matched_particles->vz[*offset] = snapshot_particles->vz[snapshot_particle_idx]; 
 
       ++(*offset);
+
     }
- 
+
   }
 
   printf("Found %ld matching particles\n", *offset);
 }
 
-int32_t write_matched_particles(part_t matched_particles, int64_t NumPart, int64_t N_match_ids_total, int32_t snapshot_file_idx)
+int32_t write_matched_particles(part_t matched_particles, int64_t NumPart, int64_t N_match_ids_total, int32_t snapshot_file_idx, int32_t ThisTask)
 {
 
   char fname[1024]; 
@@ -303,7 +327,7 @@ int32_t write_matched_particles(part_t matched_particles, int64_t NumPart, int64
   hsize_t     dims[2];
   herr_t      status;
 
-  snprintf(fname, 1024, "%s.%d.hdf5", foutbase, snapshot_file_idx);
+  snprintf(fname, 1024, "%s.%d.%d.hdf5", foutbase, snapshot_file_idx, ThisTask);
 
   file_id = H5Fcreate(fname, H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
   if (file_id == -1)
@@ -574,7 +598,7 @@ int32_t do_final_check(int64_t N_matched_total, int64_t N_match_ids_total)
     if (N_matched_global != N_match_ids_total)
     {
       fprintf(stderr, "We failed to match all the particles we were required to.\nThese particles MUST be in the snapshot somewhere...\n");
-      return EXIT_FAILURE;
+  
     }
 
   }
@@ -585,22 +609,189 @@ int32_t do_final_check(int64_t N_matched_total, int64_t N_match_ids_total)
 
 }
 
-int main(int argc, char **argv)
+int32_t read_fof_ids_ThisTask(char *fin_base, int32_t ThisTask, int32_t NTask, int64_t **fof_ids_ThisTask, int64_t *N_fof_ids_ThisTask, int64_t *N_fof_ids_AllTask)
 {
 
-  char buf[1024];
-  int32_t status, snapshot_file_idx, match_file_idx;
-  
-  int64_t N_matched_thisfile, N_matched_total = 0; // These are the number of IDs that have been matched for each snapshot subfile (_thisfile) and for the entire snapshot (_total).
-  
-  int32_t N_match_ids_highword, header_match_file_idx;
-  int64_t N_match_ids_thisfile, N_match_ids_total; // These are the number of IDs that need to be matched for each snapshot subfile (_thisfile) and for the entire snapshot (_total).
-  int64_t *match_ids;
-  part_t matched_particles;
+  int32_t fof_file_idx, status;
+  int64_t offset = 0, Nids_ThisFile, fof_idx;
+  int64_t *tmp_fof_ids_thistask, *tmp_fof_ids_thisfile;
 
-  int32_t dummy_short;
+  status = determine_N_fof_ids_ThisTask(fin_base, ThisTask, NTask, N_fof_ids_ThisTask);
+  if (status == EXIT_FAILURE)
+  {
+    return EXIT_FAILURE;
+  }
+
+  tmp_fof_ids_thistask = malloc(sizeof(int64_t) * (*N_fof_ids_ThisTask)); 
+  if(tmp_fof_ids_thistask == NULL)
+  {
+    fprintf(stderr, "Could not allocate enough memory to hold the FoF IDs for task %d\n", ThisTask);
+    return EXIT_FAILURE;
+  }
+
+  // We have now determined how many FoF IDs this task will read and allocated enough memory to hold them. //
+  // Now lets loop over each file that this task will read in, read the FoF IDs and then slice it into the global array. // 
+
+  for (fof_file_idx = ThisTask; fof_file_idx < num_fof_files; fof_file_idx += NTask)
+  { 
+
+    if(fof_file_idx % 10 == 0)
+    {
+      printf("On FoF File %d\n", fof_file_idx);
+    }
+  
+    read_fof_ids(fin_base, fof_file_idx, &tmp_fof_ids_thisfile, &Nids_ThisFile, N_fof_ids_AllTask); 
+
+    for (fof_idx = 0; fof_idx < Nids_ThisFile; ++fof_idx)
+    {
+    
+      tmp_fof_ids_thistask[fof_idx + offset] = tmp_fof_ids_thisfile[fof_idx];
+
+    }
+    offset += Nids_ThisFile;
+    free(tmp_fof_ids_thisfile);
+  } 
+
+  *fof_ids_ThisTask = tmp_fof_ids_thistask;
+
+  return EXIT_SUCCESS;
+
+}
+
+int32_t read_fof_ids(char *fin_base, int32_t i_file, int64_t **fof_ids, int64_t *Nids_ThisFile, int64_t *Nids_AllFile)
+{
+
+  char fname[1024];
+  FILE *fof_file;
+  
+  int32_t Ngroups, TotNgroups, Nids, Ntask, Offset; 
+  int64_t TotNids, *ids; 
+
+  snprintf(fname, 1024, "%s.%d", fin_base, i_file);
+  if (access(fname, F_OK) == -1)
+  {
+    fprintf(stderr, "Could not find file %s\n", fname);
+    return EXIT_FAILURE;
+  }
+
+  fof_file = fopen(fname, "rb");
+  if (fof_file == NULL)
+  { 
+    fprintf(stderr, "Could not open %s for reading\n", fname);
+    return EXIT_FAILURE;
+  } 
+
+  // Read the header //
+
+  fread(&Ngroups, sizeof(int32_t), 1, fof_file); 
+  fread(&TotNgroups, sizeof(int32_t), 1, fof_file); 
+  fread(&Nids, sizeof(int32_t), 1, fof_file); 
+  fread(&TotNids, sizeof(int64_t), 1, fof_file); 
+  fread(&Ntask, sizeof(int32_t), 1, fof_file); 
+  fread(&Offset, sizeof(int32_t), 1, fof_file); 
+
+  ids = malloc(sizeof(int64_t) * Nids);
+  if (ids == NULL)
+  {
+    fprintf(stderr, "Could not allocate memory for reading of FoF IDs from file %s\n", fname);
+    return EXIT_FAILURE;
+  } 
+
+  fread(ids, sizeof(int64_t), Nids, fof_file); 
+
+  int64_t i;
+  for(i = 0; i < Nids; ++i)
+  {
+    if (ids[i] == 247991951736)
+    {
+      printf("%ld\n", ids[i]);
+    }
+  }
+  fclose(fof_file);
+ 
+  *fof_ids = ids; 
+  *Nids_ThisFile = (int64_t) Nids;
+  *Nids_AllFile = TotNids;
+
+  return EXIT_SUCCESS;
+
+
+}
+
+int32_t read_fof_ids_header(char *fname, int32_t *Ngroups, int32_t *TotNgroups, int32_t *Nids, int64_t *TotNids, int32_t *Ntask, int32_t *Offset)
+{
+
+  FILE *fof_file;
+
+  fof_file = fopen(fname, "rb");
+  if (fof_file == NULL)
+  {     
+    fprintf(stderr, "Could not open %s for reading\n", fname);
+    return EXIT_FAILURE;
+  } 
+
+  // Read the header //
+
+  fread(Ngroups, sizeof(int32_t), 1, fof_file); 
+  fread(TotNgroups, sizeof(int32_t), 1, fof_file); 
+  fread(Nids, sizeof(int32_t), 1, fof_file); 
+  fread(TotNids, sizeof(int64_t), 1, fof_file); 
+  fread(Ntask, sizeof(int32_t), 1, fof_file); 
+  fread(Offset, sizeof(int32_t), 1, fof_file); 
+
+  fclose(fof_file);
+  return EXIT_SUCCESS;
+
+
+}
+
+int32_t determine_N_fof_ids_ThisTask(char *fin_ids, int32_t ThisTask, int32_t NTask, int64_t *N_fof_ids_thistask)
+{
+
+  char fname[1024];
+
+  int32_t Ngroups, TotNgroups, Nids, Ntask, Offset, fof_file_idx, status; 
+  int64_t TotNids;
+
+  *N_fof_ids_thistask = 0;
+
+  printf("I am Task %d and I am determining how many IDs I will be reading in\n", ThisTask);
+
+  for (fof_file_idx = ThisTask; fof_file_idx < num_fof_files; fof_file_idx += NTask)
+  { 
+
+    snprintf(fname, 1024, "%s.%d", fin_ids, fof_file_idx);
+
+    status = read_fof_ids_header(fname, &Ngroups, &TotNgroups, &Nids, &TotNids, &Ntask, &Offset);
+    if(status == EXIT_FAILURE)
+    {
+      return EXIT_FAILURE;
+    }
+     
+    *N_fof_ids_thistask += Nids;
+  }
+
+  printf("I will be reading in %ld IDs.  This is %.4f of the total number of FoF IDs.\n", *N_fof_ids_thistask, (double) *N_fof_ids_thistask / TotNids); 
+  return EXIT_SUCCESS;
+}
+
+
+
+int32_t main(int argc, char **argv)
+{
+
+  int32_t status, snapshot_file_idx;
+  
+  int64_t N_matched_total = 0; // These are the number of IDs that have been matched for each snapshot subfile (_thisfile) and for the entire snapshot (_total).
+ 
+  int64_t N_matched_thissnap = 0; 
+  int64_t N_match_ids_total=0; // These are the number of IDs that need to be matched for each snapshot subfile (_thisfile) and for the entire snapshot (_total).
+  int64_t *fof_ids;
+  part_t matched_particles;
  
   int32_t i;
+
+  int64_t N_fof_ids_ThisTask, N_fof_ids_AllTask;
  
 #ifdef MPI
   MPI_Init(&argc, &argv);
@@ -615,6 +806,9 @@ int main(int argc, char **argv)
     printf("Node name string not long enough!...\n");
     exit(EXIT_FAILURE);
   }
+#else
+  ThisTask = 0;
+  NTask = 1;
 #endif
 
   atexit(bye);
@@ -630,15 +824,60 @@ int main(int argc, char **argv)
   {
     exit(EXIT_FAILURE);
   }
+ 
+  // The logic flow of the Kali linker is different to others. //
+  // Because there are so many particles in FoFs, a single task cannot hold all of the FoF IDs (and still be below 16gb per task, the limit of largemem). //
+  // Instead we will split the FoF IDs over the tasks and then each task will search through each snapshot for their corresponding particles. //
+ 
+  printf("Starting to read in the FoF IDs.\n"); 
 
-  num_snapshot_files = 1;
-#ifdef MPI
-  for (snapshot_file_idx = ThisTask; snapshot_file_idx < num_snapshot_files; snapshot_file_idx += NTask)
-#else
+  status = read_fof_ids_ThisTask(fin_ids, ThisTask, NTask, &fof_ids, &N_fof_ids_ThisTask, &N_fof_ids_AllTask);
+  if (status == EXIT_FAILURE)
+  {
+    exit(EXIT_FAILURE);
+  }
+ 
+  printf("Read in %ld FoF IDs now sorting them\n", N_fof_ids_ThisTask);
+
+int64_t ii;
+  /*
+  for (ii = 0; ii < N_fof_ids_ThisTask-1; ++ii)
+  {
+    printf("%ld %ld\n", fof_ids[ii], fof_ids[ii+1]);
+ 
+  } 
+  */
+  
+  qsort(fof_ids, N_fof_ids_ThisTask, sizeof(int64_t), simple_cmp);
+  
+  for (ii = 0; ii < N_fof_ids_ThisTask-1; ++ii)
+  {
+  //  printf("%ld %ld %ld\n", fof_ids[ii], fof_ids[ii+1], fof_ids[ii+2]);
+    XASSERT(fof_ids[ii] < fof_ids[ii+1], "ii = %ld \t fof_ids[ii] = %ld \t fof_ids[ii+1] = %ld\n", ii, fof_ids[ii], fof_ids[ii+1]);
+  } 
+  // Now allocate memory for the matched particles.
+  
+  matched_particles = malloc(sizeof(struct particle_struct));
+
+  if (matched_particles == NULL)
+  {
+    fprintf(stderr, "Could not allocate memory for the matched particles\n"); 
+    exit(EXIT_FAILURE);
+  }
+
+  for (i = 0; i < 6; ++i)
+  {
+    matched_particles->NumParticles_Total[i] = 0; 
+  }
+  matched_particles->NumParticles_Total[1] = N_fof_ids_ThisTask; // We only have this type of particle for Kali.
+
+  matched_particles->NumParticles_Total_AllType = N_fof_ids_ThisTask; 
+  allocate_particle_memory(matched_particles, matched_particles->NumParticles_Total_AllType); 
+ 
+  // Now lets read in each snapshot and do the matching. //  
+
   for (snapshot_file_idx = 0; snapshot_file_idx < num_snapshot_files; ++snapshot_file_idx)
-#endif 
   { 
-    N_matched_thisfile = 0; // Offset for slicing in matched properties from each match ID subfile. 
     part_t snapshot_particles_local;
     snapshot_particles_local = malloc(sizeof(struct particle_struct));
 
@@ -649,74 +888,34 @@ int main(int argc, char **argv)
     }
 
     fill_particles(fin_snapshot, snapshot_file_idx, snapshot_particles_local);
-
-    // As a 'worst' case scenario we will assume that ALL particles in the snapshot will be matched. // 
-    matched_particles = malloc(sizeof(struct particle_struct));
-
-    if (matched_particles == NULL)
-    {
-      fprintf(stderr, "Could not allocate memory for the matched particles for file number %d\n", snapshot_file_idx);
-      exit(EXIT_FAILURE);
-    }
-
-    for (i = 0; i < 6; ++i)
-    {
-      matched_particles->NumParticles_Total[i] = snapshot_particles_local->NumParticles_Total[i];
-    }
-    matched_particles->NumParticles_Total_AllType = snapshot_particles_local->NumParticles_Total_AllType;
-    allocate_particle_memory(matched_particles, matched_particles->NumParticles_Total_AllType);
  
-    // Now we have the particles for the snapshot allocated, let's read in the match IDs and start matching! //
-    
-    for (match_file_idx = 0; match_file_idx < num_match_files; ++match_file_idx)
-    { 
-      snprintf(buf, 1024, "%s.%d", fin_ids, match_file_idx);
-      if (access(buf, F_OK) == -1)
-      {
-        fprintf(stderr, "Could not find file %s\n", buf);
-        exit(EXIT_FAILURE); 
-      }
+      
+    match_particles(fof_ids, N_fof_ids_ThisTask, snapshot_particles_local, matched_particles, &N_matched_thissnap);
+            
+    printf("Matched the FoF IDs. Time to write.\n");
 
-      read_match_header(buf, &header_match_file_idx, &dummy_short, &N_match_ids_thisfile, &N_match_ids_total, &N_match_ids_highword); 
-      XASSERT(header_match_file_idx == match_file_idx, "The header for the match ID file said this is file %d but the loop says it is file %d\n", header_match_file_idx, match_file_idx); 
-
-      match_ids = malloc(sizeof(int64_t) * N_match_ids_thisfile);
-      if (match_ids == NULL)
-      {
-        fprintf(stderr, "Could not allocate memory for the match IDs of file %d\n", match_file_idx);
-        exit(EXIT_FAILURE);
-      }
-
-      read_match_ids(fin_ids, match_file_idx, match_ids);
-      printf("Read in %ld match IDs now sorting them\n", N_match_ids_thisfile);
-      qsort(match_ids, N_match_ids_thisfile, sizeof(int64_t), cmpfunc);
-
-      match_particles(match_ids, N_match_ids_thisfile, snapshot_particles_local, matched_particles, &N_matched_thisfile);
-      free(match_ids); 
-
-    }
-
-    status = write_matched_particles(matched_particles, N_matched_thisfile, N_match_ids_total, snapshot_file_idx);
+    status = write_matched_particles(matched_particles, N_matched_thissnap, N_match_ids_total, snapshot_file_idx, ThisTask);
     if (status == EXIT_FAILURE)
     {
       exit(EXIT_FAILURE);
     }
-
-    free_localparticles(&matched_particles);
+   
     free_localparticles(&snapshot_particles_local);
   
-    N_matched_total += N_matched_thisfile; 
+    N_matched_total += N_matched_thissnap; 
  
   }
 
-  status = do_final_check(N_matched_total, N_match_ids_total);
+  free_localparticles(&matched_particles);
+  status = do_final_check(N_matched_total, N_fof_ids_AllTask);
   if (status == EXIT_FAILURE)
   {
     exit(EXIT_FAILURE);
   }
 
-  XASSERT(N_match_ids_total == N_matched_total, "From the particle ID match file we required to match %ld particles.  However, after searching all %d snapshot subfiles, we only matched %ld IDs.\nThese matched particles MUST be in the snapshot somewhere...\n", N_match_ids_total, num_snapshot_files, N_matched_total);
+  //XASSERT(N_match_ids_total == N_matched_total, "From the particle ID match file we required to match %ld particles.  However, after searching all %d snapshot subfiles, we only matched %ld IDs.\nThese matched particles MUST be in the snapshot somewhere...\n", N_match_ids_total, num_snapshot_files, N_matched_total);
 
+  free(fof_ids); 
   free(fin_ids);
   free(fin_snapshot);
   free(foutbase); 
