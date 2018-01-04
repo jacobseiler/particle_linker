@@ -48,7 +48,7 @@ int32_t read_fof_ids_ThisTask(char *fin_base, int32_t ThisTask, int32_t NTask, i
 int32_t determine_N_fof_ids_ThisTask(char *fin_ids, int32_t ThisTask, int32_t NTask, int64_t *N_fof_ids_thistask);
 int32_t read_fof_ids(char *fin_base, int32_t i_file, int64_t **fof_ids, int64_t *Nids_ThisFile, int64_t *Nids_AllFile);
 int32_t write_matched_particles(part_t matched_particles, int64_t NumPart, int64_t N_match_ids_total, int32_t snapshot_file_idx, int32_t ThisTask);
-
+void match_particles(int64_t *match_ids, int64_t N_match_ids, part_t snapshot_particles, part_t matched_particles, int64_t *offset, int64_t *N_matched_ThisSnap);
 // Functions //
 
 void bye()
@@ -196,13 +196,13 @@ int32_t read_match_ids(char *fin_base, int32_t i_file, int64_t *match_ids)
 
 }
 
-void match_particles(int64_t *match_ids, int64_t N_match_ids, part_t snapshot_particles, part_t matched_particles, int64_t *offset)
+void match_particles(int64_t *match_ids, int64_t N_match_ids, part_t snapshot_particles, part_t matched_particles, int64_t *offset, int64_t *N_matched_ThisSnap)
 {
   // Here match_ids is the sorted list of particle IDs that we want to find in the snapshot particle struct.
   // Since match_ids is sorted we will iterate over every particle in the snapshot and search for a match in match_ids. 
 
   int32_t is_found;
-  int64_t count, search_idx, snapshot_particle_idx, particle_idx;
+  int64_t count, search_idx, snapshot_particle_idx, particle_idx, N_matched = 0;
 
   printf("We are performing matching over %ld particles\n", snapshot_particles->NumParticles_Total[1]);
 
@@ -307,12 +307,14 @@ void match_particles(int64_t *match_ids, int64_t N_match_ids, part_t snapshot_pa
       matched_particles->vz[*offset] = snapshot_particles->vz[snapshot_particle_idx]; 
 
       ++(*offset);
-
+      ++N_matched;
     }
 
   }
 
-  printf("Found %ld matching particles\n", *offset);
+  printf("Found %ld matching particles\n", N_matched);
+  *N_matched_ThisSnap = N_matched;
+
 }
 
 int32_t write_matched_particles(part_t matched_particles, int64_t NumPart, int64_t N_match_ids_total, int32_t snapshot_file_idx, int32_t ThisTask)
@@ -327,7 +329,7 @@ int32_t write_matched_particles(part_t matched_particles, int64_t NumPart, int64
   hsize_t     dims[2];
   herr_t      status;
 
-  snprintf(fname, 1024, "%s.%d.%d.hdf5", foutbase, snapshot_file_idx, ThisTask);
+  snprintf(fname, 1024, "%s.%d.hdf5", foutbase, snapshot_file_idx);
 
   file_id = H5Fcreate(fname, H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
   if (file_id == -1)
@@ -374,7 +376,7 @@ int32_t write_matched_particles(part_t matched_particles, int64_t NumPart, int64
   status = H5Dclose(dataset_id); // End access to the dataset and release resources used by it.
   status = H5Sclose(dataspace_id); // Terminate access to the data space.
 
-  printf("Successfully wrote the particle IDs.\n");
+  //printf("Successfully wrote the particle IDs.\n");
 
   // Position //
 
@@ -399,7 +401,7 @@ int32_t write_matched_particles(part_t matched_particles, int64_t NumPart, int64
   status = H5Dclose(dataset_id); 
   status = H5Sclose(dataspace_id); 
 
-  printf("Successfully wrote the particle positions.\n");
+  //printf("Successfully wrote the particle positions.\n");
 
   // Velocity //
  
@@ -445,6 +447,8 @@ int32_t write_matched_particles(part_t matched_particles, int64_t NumPart, int64
   free(buffer_array_multi);
   free(buffer_array_double);
   free(buffer_array_long);
+
+  printf("Finished writing to %s\n", fname); 
 
   return EXIT_SUCCESS; 
 
@@ -781,11 +785,8 @@ int32_t main(int argc, char **argv)
 {
 
   int32_t status, snapshot_file_idx;
-  
-  int64_t N_matched_total = 0; // These are the number of IDs that have been matched for each snapshot subfile (_thisfile) and for the entire snapshot (_total).
  
-  int64_t N_matched_thissnap = 0; 
-  int64_t N_match_ids_total=0; // These are the number of IDs that need to be matched for each snapshot subfile (_thisfile) and for the entire snapshot (_total).
+  int64_t N_matched_ThisSnap = 0, N_matched_AllSnap = 0;   
   int64_t *fof_ids;
   part_t matched_particles;
  
@@ -812,6 +813,19 @@ int32_t main(int argc, char **argv)
 #endif
 
   atexit(bye);
+
+  int32_t processors, max_processors; 
+
+  processors = 64;
+  max_processors = 56; 
+
+  if (ThisTask >= max_processors) 
+  {
+    fprintf(stderr, "I am Task %d and I am doing nothing. Ciao!\n", ThisTask);
+    return 1;
+  }
+ 
+  NTask = max_processors; 
  
   status = parse_params(argc, argv); // Set the input parameters.
   if (status == EXIT_FAILURE)
@@ -831,7 +845,7 @@ int32_t main(int argc, char **argv)
  
   printf("Starting to read in the FoF IDs.\n"); 
 
-  status = read_fof_ids_ThisTask(fin_ids, ThisTask, NTask, &fof_ids, &N_fof_ids_ThisTask, &N_fof_ids_AllTask);
+  status = read_fof_ids_ThisTask(fin_ids, 0, 1, &fof_ids, &N_fof_ids_ThisTask, &N_fof_ids_AllTask);
   if (status == EXIT_FAILURE)
   {
     exit(EXIT_FAILURE);
@@ -876,7 +890,7 @@ int64_t ii;
  
   // Now lets read in each snapshot and do the matching. //  
 
-  for (snapshot_file_idx = 0; snapshot_file_idx < num_snapshot_files; ++snapshot_file_idx)
+  for (snapshot_file_idx = ThisTask; snapshot_file_idx < num_snapshot_files; snapshot_file_idx += NTask)
   { 
     part_t snapshot_particles_local;
     snapshot_particles_local = malloc(sizeof(struct particle_struct));
@@ -887,27 +901,25 @@ int64_t ii;
       exit(EXIT_FAILURE);
     }
 
+    printf("I am Task %d and I am reading from snapshot file %d\n", ThisTask, snapshot_file_idx);
     fill_particles(fin_snapshot, snapshot_file_idx, snapshot_particles_local);
- 
-      
-    match_particles(fof_ids, N_fof_ids_ThisTask, snapshot_particles_local, matched_particles, &N_matched_thissnap);
+  
+    match_particles(fof_ids, N_fof_ids_ThisTask, snapshot_particles_local, matched_particles, &N_matched_AllSnap, &N_matched_ThisSnap);
             
     printf("Matched the FoF IDs. Time to write.\n");
 
-    status = write_matched_particles(matched_particles, N_matched_thissnap, N_match_ids_total, snapshot_file_idx, ThisTask);
+    status = write_matched_particles(matched_particles, N_matched_ThisSnap, N_matched_AllSnap, snapshot_file_idx, ThisTask);
     if (status == EXIT_FAILURE)
     {
       exit(EXIT_FAILURE);
     }
    
-    free_localparticles(&snapshot_particles_local);
-  
-    N_matched_total += N_matched_thissnap; 
+    free_localparticles(&snapshot_particles_local);      
  
   }
 
   free_localparticles(&matched_particles);
-  status = do_final_check(N_matched_total, N_fof_ids_AllTask);
+  status = do_final_check(N_matched_AllSnap, N_fof_ids_AllTask);
   if (status == EXIT_FAILURE)
   {
     exit(EXIT_FAILURE);
@@ -919,12 +931,6 @@ int64_t ii;
   free(fin_ids);
   free(fin_snapshot);
   free(foutbase); 
-
-  // Read in the snapshot particles.
-  // Loop over the matching particle IDs
-  // Match
-  // End Loop; write out shit.
-
  
   return EXIT_SUCCESS;
 } 
