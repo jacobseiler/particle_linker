@@ -47,7 +47,7 @@ int32_t write_hdf5_header(hid_t group_id, int64_t NumPart, int64_t N_match_ids_t
 int32_t read_fof_ids_ThisTask(char *fin_base, int32_t ThisTask, int32_t NTask, int64_t **fof_ids_ThisTask, int64_t *N_fof_ids_ThisTask, int64_t *N_fof_ids_AllTask);
 int32_t determine_N_fof_ids_ThisTask(char *fin_ids, int32_t ThisTask, int32_t NTask, int64_t *N_fof_ids_thistask);
 int32_t read_fof_ids(char *fin_base, int32_t i_file, int64_t **fof_ids, int64_t *Nids_ThisFile, int64_t *Nids_AllFile);
-int32_t write_matched_particles(part_t matched_particles, int64_t NumPart, int64_t N_match_ids_total, int32_t snapshot_file_idx, int32_t ThisTask);
+int32_t write_matched_particles_ThisSnap(part_t matched_particles, int64_t NumPart, int64_t N_match_ids_total, int32_t snapshot_file_idx, int32_t ThisTask);
 
 // Functions //
 
@@ -314,8 +314,8 @@ void match_particles(int64_t *match_ids, int64_t N_match_ids, part_t snapshot_pa
 
   printf("Found %ld matching particles\n", *offset);
 }
-
-int32_t write_matched_particles(part_t matched_particles, int64_t NumPart, int64_t N_match_ids_total, int32_t snapshot_file_idx, int32_t ThisTask)
+ 
+int32_t write_matched_particles_ThisSnap(part_t matched_particles, int64_t N_matched_ThisSnap, int64_t N_matched_AllSnap, int32_t snapshot_file_idx, int32_t ThisTask)
 {
 
   char fname[1024]; 
@@ -336,32 +336,32 @@ int32_t write_matched_particles(part_t matched_particles, int64_t NumPart, int64
     return EXIT_FAILURE;  
   }
 
-  dims[0] = NumPart; // This is the number of particles we are writing.
+  dims[0] = N_matched_ThisSnap; // This is the number of particles we are writing.
 
-  buffer_array_long = malloc(sizeof(int64_t) * NumPart);
+  buffer_array_long = malloc(sizeof(int64_t) * N_matched_ThisSnap);
   if (buffer_array_long == NULL)
   {
     fprintf(stderr, "Cannot allocate memory for buffer array long\n");
     return EXIT_FAILURE;
   }
  
-  buffer_array_double = malloc(sizeof(double) * NumPart);
+  buffer_array_double = malloc(sizeof(double) * N_matched_ThisSnap);
   if (buffer_array_double == NULL)
   {
     fprintf(stderr, "Cannot allocate memory for buffer array double\n");
     return EXIT_FAILURE;
   }
 
-  buffer_array_multi = (double **)malloc(sizeof(double *) * NumPart); // Malloc the top level array.
-  buffer_array_multi[0] = (double *)malloc(sizeof(double) * NumPart*3); // Then allocate a contiguous block of memory for the particles.
+  buffer_array_multi = (double **)malloc(sizeof(double *) * N_matched_ThisSnap); // Malloc the top level array.
+  buffer_array_multi[0] = (double *)malloc(sizeof(double) * N_matched_ThisSnap*3); // Then allocate a contiguous block of memory for the particles.
 
-  for (i = 1; i < NumPart; ++i) buffer_array_multi[i] = buffer_array_multi[0]+ i*3;
+  for (i = 1; i < N_matched_ThisSnap; ++i) buffer_array_multi[i] = buffer_array_multi[0]+ i*3;
 
   group_id = H5Gcreate2(file_id, "/PartType1", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
  
   // Let's start with the particle IDs //
 
-  for (i = 0; i < NumPart; ++i)
+  for (i = N_matched_AllSnap; i < N_matched_AllSnap + N_matched_ThisSnap; ++i)
   {
     buffer_array_long[i] = matched_particles->ID[i];
 //    printf("%ld\n", buffer_array_long[i]);
@@ -378,7 +378,7 @@ int32_t write_matched_particles(part_t matched_particles, int64_t NumPart, int64
 
   // Position //
 
-  for (i = 0; i < NumPart; ++i)
+  for (i = N_matched_AllSnap; i < N_matched_AllSnap + N_matched_ThisSnap; ++i)  
   {
     buffer_array_multi[i][0] = matched_particles->posx[i];
     buffer_array_multi[i][1] = matched_particles->posy[i];
@@ -402,8 +402,8 @@ int32_t write_matched_particles(part_t matched_particles, int64_t NumPart, int64
   printf("Successfully wrote the particle positions.\n");
 
   // Velocity //
- 
-  for (i = 0; i < NumPart; ++i)
+  
+  for (i = N_matched_AllSnap; i < N_matched_AllSnap + N_matched_ThisSnap; ++i)
   {
     buffer_array_multi[i][0] = matched_particles->vx[i];
     buffer_array_multi[i][1] = matched_particles->vy[i];
@@ -430,7 +430,7 @@ int32_t write_matched_particles(part_t matched_particles, int64_t NumPart, int64
 
   group_id = H5Gcreate(file_id, "/Header", 0, H5P_DEFAULT, H5P_DEFAULT);
 
-  status = write_hdf5_header(group_id, NumPart, N_match_ids_total, snapshot_file_idx);
+  status = write_hdf5_header(group_id, N_matched_ThisSnap, N_matched_AllSnap, snapshot_file_idx);
   if (status == EXIT_FAILURE)
   {
     return EXIT_FAILURE;
@@ -450,7 +450,7 @@ int32_t write_matched_particles(part_t matched_particles, int64_t NumPart, int64
 
 }
 
-int32_t write_hdf5_header(hid_t group_id, int64_t NumPart, int64_t N_match_ids_total, int32_t snapshot_file_idx) 
+int32_t write_hdf5_header(hid_t group_id, int64_t N_matched_ThisSnap, int64_t N_matched_AllSnap, int32_t snapshot_file_idx) 
 {
   // Notice here I'm doing something a little bit tricky.
   // Normally we could only write out the local information as the attributes and then at the end of the program I'd need to flick back through all the files and write out the global, 'NumPart_Total' information after gathering the numbers from all processors.
@@ -484,9 +484,9 @@ int32_t write_hdf5_header(hid_t group_id, int64_t NumPart, int64_t N_match_ids_t
   {
     if (i == 1)
     {
-      NumPart_ThisFile[i] = NumPart;
-      NumPart_Total[i] = N_match_ids_total; 
-      NumPart_Total_HighWord[i] = N_match_ids_total >> 32; 
+      NumPart_ThisFile[i] = N_matched_ThisSnap;
+      NumPart_Total[i] = N_matched_AllSnap; // Garbage, won't actually be correct. 
+      NumPart_Total_HighWord[i] = N_matched_AllSnap >> 32; 
     }
     else
     {
@@ -567,7 +567,6 @@ int32_t write_hdf5_header(hid_t group_id, int64_t NumPart, int64_t N_match_ids_t
   H5Awrite(attribute_id, H5T_NATIVE_INT, &NumPart_Total_HighWord);
   H5Aclose(attribute_id);
   H5Sclose(dataspace_id);
-
 
   free(file_header);
 
@@ -812,7 +811,24 @@ int32_t main(int argc, char **argv)
 #endif
 
   atexit(bye);
+
+  // If each process reads in the entire FoF ID list and a single (different) snapshot, then the required memory is JUST larger than that available on largemem. //
+  // Ideally I'd just drop down the number of processors used by a few but largemem REQUIRES you to use all 32. //
+  // So I'm going to do something stupid and launch the program with 32 but then only use 26 of them, leaving 6 idle. //
+
+  int32_t processors, max_processors; 
+
+  processors = 4;
+  max_processors = 4; 
+
+  if (ThisTask >= max_processors) 
+  {
+    fprintf(stderr, "I am Task %d and I am doing nothing. Ciao!\n", ThisTask);
+    return 1;
+  }
  
+  NTask = max_processors; 
+
   status = parse_params(argc, argv); // Set the input parameters.
   if (status == EXIT_FAILURE)
   {
@@ -831,7 +847,8 @@ int32_t main(int argc, char **argv)
  
   printf("Starting to read in the FoF IDs.\n"); 
 
-  status = read_fof_ids_ThisTask(fin_ids, ThisTask, NTask, &fof_ids, &N_fof_ids_ThisTask, &N_fof_ids_AllTask);
+  //status = read_fof_ids_ThisTask(fin_ids, 0, 1, &fof_ids, &N_fof_ids_ThisTask, &N_fof_ids_AllTask); // We pass ThisTask = 0 and NTask = 1 here to trick the function into loading ALL the FoF IDs.
+  status = read_fof_ids_ThisTask(fin_ids, ThisTask, NTask, &fof_ids, &N_fof_ids_ThisTask, &N_fof_ids_AllTask); // We pass ThisTask = 0 and NTask = 1 here to trick the function into loading ALL the FoF IDs.
   if (status == EXIT_FAILURE)
   {
     exit(EXIT_FAILURE);
@@ -839,7 +856,7 @@ int32_t main(int argc, char **argv)
  
   printf("Read in %ld FoF IDs now sorting them\n", N_fof_ids_ThisTask);
 
-int64_t ii;
+  int64_t ii;
   /*
   for (ii = 0; ii < N_fof_ids_ThisTask-1; ++ii)
   {
@@ -874,27 +891,30 @@ int64_t ii;
   matched_particles->NumParticles_Total_AllType = N_fof_ids_ThisTask; 
   allocate_particle_memory(matched_particles, matched_particles->NumParticles_Total_AllType); 
  
-  // Now lets read in each snapshot and do the matching. //  
+  // Now lets read in each snapshot and do the matching. // 
 
-  for (snapshot_file_idx = 0; snapshot_file_idx < num_snapshot_files; ++snapshot_file_idx)
+//  for (snapshot_file_idx = ThisTask; snapshot_file_idx < num_snapshot_files; snapshot_file_idx += NTask) 
+  for (snapshot_file_idx = 0; snapshot_file_idx < num_snapshot_files; snapshot_file_idx++) 
   { 
     part_t snapshot_particles_local;
     snapshot_particles_local = malloc(sizeof(struct particle_struct));
-
+    
     if (snapshot_particles_local == NULL)
     {
       fprintf(stderr, "Could not allocate memory for local snapshot particles for file number %d\n", snapshot_file_idx);
       exit(EXIT_FAILURE);
     }
 
-    fill_particles(fin_snapshot, snapshot_file_idx, snapshot_particles_local);
- 
-      
+    if (ThisTask == 0)
+    {
+      fill_particles(fin_snapshot, snapshot_file_idx, snapshot_particles_local);
+    }
+  
     match_particles(fof_ids, N_fof_ids_ThisTask, snapshot_particles_local, matched_particles, &N_matched_thissnap);
             
     printf("Matched the FoF IDs. Time to write.\n");
 
-    status = write_matched_particles(matched_particles, N_matched_thissnap, N_match_ids_total, snapshot_file_idx, ThisTask);
+    status = write_matched_particles_ThisSnap(matched_particles, N_matched_thissnap, N_match_ids_total, snapshot_file_idx, ThisTask);
     if (status == EXIT_FAILURE)
     {
       exit(EXIT_FAILURE);
