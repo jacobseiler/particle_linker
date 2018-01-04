@@ -816,19 +816,6 @@ int32_t main(int argc, char **argv)
   // Ideally I'd just drop down the number of processors used by a few but largemem REQUIRES you to use all 32. //
   // So I'm going to do something stupid and launch the program with 32 but then only use 26 of them, leaving 6 idle. //
 
-  int32_t processors, max_processors; 
-
-  processors = 4;
-  max_processors = 4; 
-
-  if (ThisTask >= max_processors) 
-  {
-    fprintf(stderr, "I am Task %d and I am doing nothing. Ciao!\n", ThisTask);
-    return 1;
-  }
- 
-  NTask = max_processors; 
-
   status = parse_params(argc, argv); // Set the input parameters.
   if (status == EXIT_FAILURE)
   {
