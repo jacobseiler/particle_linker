@@ -1,3 +1,5 @@
 *.o
 particle_linker
 *.log
+*.e*
+*.o*
