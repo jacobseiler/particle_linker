@@ -77,20 +77,71 @@ int32_t cmpfunc (const void * a, const void * b) {
 int32_t parse_params(int32_t argc, char **argv)
 {
 
+  char check_fof[1024], check_snapshot[1024], check_logfile[1024];
+  int32_t snapnum;
+
   if (argc != 5)
   {
     fprintf(stderr, "This is the version of the particle linker that will link the FoF particles for the Kali simulation.\n");
-    fprintf(stderr, "Usage : ./kali_linker <FoF IDs Base> <Number of FoF IDs Subfiles> <Kali Snapshot Base> <Output Base>\n"); 
+    fprintf(stderr, "Usage : ./kali_linker <FoF IDs Base> <Kali Snapshot Base> <Output Base> <Snapshot Number>\n"); 
+
     return EXIT_FAILURE; 
   }
 
   fin_ids = strdup(argv[1]);
-  num_fof_files = atoi(argv[2]);
-  fin_snapshot = strdup(argv[3]);
-  foutbase = strdup(argv[4]); 
+
+  snprintf(check_fof, 1024, "%s.1008", fin_ids);
+
+  if (access(check_fof, F_OK) == -1)
+  { 
+    printf("The number of FoF ID files is 1008\n");
+    num_fof_files = 1008; 
+  }
+  else
+  {
+    printf("The number of FoF ID files is 1540\n");
+    num_fof_files = 1540; 
+  } 
+    
+  fin_snapshot = strdup(argv[2]);
+
+  snprintf(check_snapshot, 1024, "%s.0.hdf5", fin_snapshot);
+  printf("%s\n", check_snapshot); 
+  if (access(check_snapshot, F_OK) == -1)
+  { 
+    printf("There are no snapshot files for this snapshot.\n");
+    return EXIT_FAILURE; 
+  }
+
+
+  foutbase = strdup(argv[3]); 
+
+  snapnum = atoi(argv[4]);
+
+  snprintf(check_logfile, 1024, "%s/logfiles/kali_%03d.log", "/lustre/projects/p134_swin/jseiler/kali/pseudo_snapshots/", snapnum); 
+
+  if (access(check_logfile, F_OK) == -1)
+  {
+  }
+  else
+  {
+    FILE *logfile;
+    int64_t file_size;
+    logfile = fopen(check_logfile, "r");
+    
+    fseek(logfile, 0L, SEEK_END); // Move to the end of the file
+    file_size = ftell(logfile); // Then count how many bytes we have in it.
+    fclose(logfile);
+  
+    if (file_size > 320.0 * 1024.0 && file_size < 360.0 * 1024.0)
+    {
+      fprintf(stderr, "The logfile has a size %.4f KB meaning that it has already been matched. Exiting.\n", file_size / 1024.0);
+      return EXIT_FAILURE;
+    }
+  } 
 
   printf("==================================================\n");
-  printf("Running with parameters :\nFoF IDs : %s\nNumber of FoF IDs Subfiles : %d\nInput Snapshot : %s\nOutput Path : %s\n", fin_ids, num_fof_files, fin_snapshot, foutbase);
+  printf("Running with parameters :\nFoF IDs : %s\nNumber of FoF IDs Subfiles : %d\nInput Snapshot : %s\nOutput Path : %s\nSnapshot Number : %d\n", fin_ids, num_fof_files, fin_snapshot, foutbase, snapnum);
   printf("==================================================\n\n");
 
   return EXIT_SUCCESS;
@@ -210,7 +261,7 @@ void match_particles(int64_t *match_ids, int64_t N_fof_ids, part_t snapshot_part
 
   int64_t *matched_particle_idx, idx;
   
-  matched_particle_idx = malloc(sizeof(int64_t) * N_fof_ids * 0.1); // Assume that at most only a tenth of the FoF particles will be in this snapshot file.
+  matched_particle_idx = malloc(sizeof(int64_t) * N_fof_ids * 1.1); // Assume that at most only a tenth of the FoF particles will be in this snapshot file.
  
   // Since the snapshot_particles contain ALL particle types we will only loop over the halo particles (particle type 1).
   for (snapshot_particle_idx = snapshot_particles->NumParticles_Total[0]; snapshot_particle_idx < (snapshot_particles->NumParticles_Total[0] + snapshot_particles->NumParticles_Total[1]); ++snapshot_particle_idx) 
@@ -302,7 +353,7 @@ void match_particles(int64_t *match_ids, int64_t N_fof_ids, part_t snapshot_part
       matched_particle_idx[N_matched] = snapshot_particle_idx; 
       ++N_matched;
 
-      XASSERT(N_matched < N_fof_ids * 0.1, "We are %.4f the way through matching the FOF IDs and we have hit the limit of our allocated space for matched_particle_idx.  The limit is %.4f and we are at %ld\n", progress, (int64_t) N_fof_ids * 0.1, N_matched); 
+      XASSERT(N_matched < N_fof_ids * 1.1, "We are %.4f the way through matching the FOF IDs and we have hit the limit of our allocated space for matched_particle_idx.  The limit is %.4f and we are at %ld\n", progress, (int64_t) N_fof_ids * 1.1, N_matched); 
     }
 
   }
@@ -362,92 +413,89 @@ int32_t write_matched_particles_ThisSnap(part_t matched_particles, int64_t N_mat
     return EXIT_FAILURE;  
   }
 
+  group_id = H5Gcreate2(file_id, "/PartType1", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+
   dims[0] = N_matched_ThisSnap; // This is the number of particles we are writing.
 
-  if (N_matched_ThisSnap == 0) // Have no IDs matched for this snapshot file so let's write the header and move on.
+  if (N_matched_ThisSnap != 0) // Have no IDs matched for this snapshot file so let's write the header and move on.
   {
+  
+    buffer_array_long = malloc(sizeof(int64_t) * N_matched_ThisSnap);
+    if (buffer_array_long == NULL)
+    {
+      fprintf(stderr, "Cannot allocate memory for buffer array long\n");
+      return EXIT_FAILURE;
+    }
+   
+    buffer_array_double = malloc(sizeof(double) * N_matched_ThisSnap);
+    if (buffer_array_double == NULL)
+    {
+      fprintf(stderr, "Cannot allocate memory for buffer array double\n");
+      return EXIT_FAILURE;
+    }
 
-    status = write_hdf5_header(group_id, N_matched_ThisSnap, N_matched_AllSnap, snapshot_file_idx, N_fof_ids);
-    return status; 
+    buffer_array_multi = (double **)malloc(sizeof(double *) * N_matched_ThisSnap); // Malloc the top level array.
+    buffer_array_multi[0] = (double *)malloc(sizeof(double) * N_matched_ThisSnap*3); // Then allocate a contiguous block of memory for the particles.
+
+    for (i = 1; i < N_matched_ThisSnap; ++i) buffer_array_multi[i] = buffer_array_multi[0]+ i*3;
+   
+    // Let's start with the particle IDs //
+    for (i = 0; i < N_matched_ThisSnap; ++i)
+    {
+      buffer_array_long[i] = matched_particles->ID[i];
+    } 
+
+    dataspace_id = H5Screate_simple(1, &dims[0], NULL); // Creates the dataspace.
+
+    dataset_id = H5Dcreate2(file_id, "/PartType1/ParticleIDs", H5T_NATIVE_LONG, dataspace_id, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT); // Create the dataset inside the group. 
+    status = H5Dwrite(dataset_id, H5T_NATIVE_LONG, H5S_ALL, H5S_ALL, H5P_DEFAULT, buffer_array_long); // Then write the particle IDs.
+    status = H5Dclose(dataset_id); // End access to the dataset and release resources used by it.
+    status = H5Sclose(dataspace_id); // Terminate access to the data space.
+
+    // Position //
+
+    for (i = 0; i < N_matched_ThisSnap; ++i)
+    {
+      buffer_array_multi[i][0] = matched_particles->posx[i];
+      buffer_array_multi[i][1] = matched_particles->posy[i];
+      buffer_array_multi[i][2] = matched_particles->posz[i];
+    } 
+
+    dims[1] = 3; 
+    dataspace_id = H5Screate_simple(2, dims, NULL); 
+
+    datatype = H5Tcopy(H5T_NATIVE_DOUBLE);
+    status = H5Tset_order(datatype, H5T_ORDER_LE); 
+
+    dataset_id = H5Dcreate2(file_id, "/PartType1/Coordinates", datatype, dataspace_id, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT); 
+    status = H5Dwrite(dataset_id, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, &buffer_array_multi[0][0]); 
+    status = H5Dclose(dataset_id); 
+    status = H5Sclose(dataspace_id); 
+
+    // Velocity //
+   
+    for (i = 0; i < N_matched_ThisSnap; ++i)
+    {
+      buffer_array_multi[i][0] = matched_particles->vx[i];
+      buffer_array_multi[i][1] = matched_particles->vy[i];
+      buffer_array_multi[i][2] = matched_particles->vz[i];
+
+    } 
+
+    dims[1] = 3; 
+    dataspace_id = H5Screate_simple(2, dims, NULL); // Creates the dataspace.
+
+    datatype = H5Tcopy(H5T_NATIVE_DOUBLE);
+    status = H5Tset_order(datatype, H5T_ORDER_LE); 
+
+    dataset_id = H5Dcreate2(file_id, "/PartType1/Velocities", datatype, dataspace_id, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT); 
+    status = H5Dwrite(dataset_id, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, &buffer_array_multi[0][0]); 
+    status = H5Dclose(dataset_id); 
+    status = H5Sclose(dataspace_id); 
+
+    status = H5Gclose(group_id);
 
   }
-
-  buffer_array_long = malloc(sizeof(int64_t) * N_matched_ThisSnap);
-  if (buffer_array_long == NULL)
-  {
-    fprintf(stderr, "Cannot allocate memory for buffer array long\n");
-    return EXIT_FAILURE;
-  }
- 
-  buffer_array_double = malloc(sizeof(double) * N_matched_ThisSnap);
-  if (buffer_array_double == NULL)
-  {
-    fprintf(stderr, "Cannot allocate memory for buffer array double\n");
-    return EXIT_FAILURE;
-  }
-
-  buffer_array_multi = (double **)malloc(sizeof(double *) * N_matched_ThisSnap); // Malloc the top level array.
-  buffer_array_multi[0] = (double *)malloc(sizeof(double) * N_matched_ThisSnap*3); // Then allocate a contiguous block of memory for the particles.
-
-  for (i = 1; i < N_matched_ThisSnap; ++i) buffer_array_multi[i] = buffer_array_multi[0]+ i*3;
-
-  group_id = H5Gcreate2(file_id, "/PartType1", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
- 
-  // Let's start with the particle IDs //
-  for (i = 0; i < N_matched_ThisSnap; ++i)
-  {
-    buffer_array_long[i] = matched_particles->ID[i];
-  } 
-
-  dataspace_id = H5Screate_simple(1, &dims[0], NULL); // Creates the dataspace.
-
-  dataset_id = H5Dcreate2(file_id, "/PartType1/ParticleIDs", H5T_NATIVE_LONG, dataspace_id, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT); // Create the dataset inside the group. 
-  status = H5Dwrite(dataset_id, H5T_NATIVE_LONG, H5S_ALL, H5S_ALL, H5P_DEFAULT, buffer_array_long); // Then write the particle IDs.
-  status = H5Dclose(dataset_id); // End access to the dataset and release resources used by it.
-  status = H5Sclose(dataspace_id); // Terminate access to the data space.
-
-  // Position //
-
-  for (i = 0; i < N_matched_ThisSnap; ++i)
-  {
-    buffer_array_multi[i][0] = matched_particles->posx[i];
-    buffer_array_multi[i][1] = matched_particles->posy[i];
-    buffer_array_multi[i][2] = matched_particles->posz[i];
-  } 
-
-  dims[1] = 3; 
-  dataspace_id = H5Screate_simple(2, dims, NULL); 
-
-  datatype = H5Tcopy(H5T_NATIVE_DOUBLE);
-  status = H5Tset_order(datatype, H5T_ORDER_LE); 
-
-  dataset_id = H5Dcreate2(file_id, "/PartType1/Coordinates", datatype, dataspace_id, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT); 
-  status = H5Dwrite(dataset_id, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, &buffer_array_multi[0][0]); 
-  status = H5Dclose(dataset_id); 
-  status = H5Sclose(dataspace_id); 
-
-  // Velocity //
- 
-  for (i = 0; i < N_matched_ThisSnap; ++i)
-  {
-    buffer_array_multi[i][0] = matched_particles->vx[i];
-    buffer_array_multi[i][1] = matched_particles->vy[i];
-    buffer_array_multi[i][2] = matched_particles->vz[i];
-
-  } 
-
-  dims[1] = 3; 
-  dataspace_id = H5Screate_simple(2, dims, NULL); // Creates the dataspace.
-
-  datatype = H5Tcopy(H5T_NATIVE_DOUBLE);
-  status = H5Tset_order(datatype, H5T_ORDER_LE); 
-
-  dataset_id = H5Dcreate2(file_id, "/PartType1/Velocities", datatype, dataspace_id, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT); 
-  status = H5Dwrite(dataset_id, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, &buffer_array_multi[0][0]); 
-  status = H5Dclose(dataset_id); 
-  status = H5Sclose(dataspace_id); 
-
-  status = H5Gclose(group_id);
 
   // All the data written, create some attributes //
 
@@ -464,10 +512,13 @@ int32_t write_matched_particles_ThisSnap(part_t matched_particles, int64_t N_mat
 
   status = H5Fclose(file_id);
 
-  free(buffer_array_multi[0]);
-  free(buffer_array_multi);
-  free(buffer_array_double);
-  free(buffer_array_long);
+  if (N_matched_ThisSnap != 0) // Have no IDs matched for this snapshot file so let's write the header and move on.
+  {
+    free(buffer_array_multi[0]);
+    free(buffer_array_multi);
+    free(buffer_array_double);
+    free(buffer_array_long);
+  }
 
   return EXIT_SUCCESS; 
 
@@ -498,14 +549,14 @@ int32_t write_hdf5_header(hid_t group_id, int64_t N_matched_ThisSnap, int64_t N_
   { 
     return EXIT_FAILURE;
   }
- 
+
   for (i = 0; i < 6; ++i)
   {
     if (i == 1)
     {
       NumPart_ThisFile[i] = N_matched_ThisSnap;
       NumPart_Total[i] = N_fof_ids; 
-      NumPart_Total_HighWord[i] = N_fof_ids; 
+      NumPart_Total_HighWord[i] = N_fof_ids >> 32; 
     }
     else
     {
@@ -616,14 +667,12 @@ int32_t do_final_check(int64_t N_matched_total, int64_t N_match_ids_total)
     if (N_matched_global != N_match_ids_total)
     {
       fprintf(stderr, "We failed to match all the particles we were required to.\nThese particles MUST be in the snapshot somewhere...\n");
-  
+      return EXIT_FAILURE;  
     }
 
   }
 
   return EXIT_SUCCESS;
-
-
 
 }
 
@@ -791,7 +840,14 @@ int32_t determine_N_fof_ids_ThisTask(char *fin_ids, int32_t ThisTask, int32_t NT
     *N_fof_ids_thistask += Nids;
   }
 
+  if (NTask == 1 && *N_fof_ids_thistask != TotNids)
+  {
+    printf("We are only running with 1 Task but we have not read in the all the FoF IDs\nWe read in %ld compared to the total number %ld\n", *N_fof_ids_thistask, TotNids);
+    return EXIT_FAILURE;
+  }
+    
   printf("I will be reading in %ld IDs.  This is %.4f of the total number of FoF IDs.\n", *N_fof_ids_thistask, (double) *N_fof_ids_thistask / TotNids); 
+ 
   return EXIT_SUCCESS;
 }
 
@@ -825,31 +881,43 @@ int32_t main(int argc, char **argv)
 
   atexit(bye);
 
-#ifdef ADJUST_PROCESSORS 
-  int32_t processors, max_processors; 
-
-  processors = 32;
-  max_processors = 26; 
-
-  if (ThisTask >= max_processors) 
-  {
-    fprintf(stderr, "I am Task %d and I am doing nothing. Ciao!\n", ThisTask);
-    return 1;
-  }
- 
-  NTask = max_processors; 
-#endif
- 
   status = parse_params(argc, argv); // Set the input parameters.
   if (status == EXIT_FAILURE)
   {
+#ifdef MPI
+    MPI_Abort(MPI_COMM_WORLD, 1);
+#else
     exit(EXIT_FAILURE);
+#endif
   }
 
+#ifdef ADJUST_PROCESSORS 
+  int32_t max_processors; 
+
+  max_processors = 58; 
+
+  if (ThisTask >= max_processors) 
+  {
+    fprintf(stderr, "I am Task %d and I am doing nothing.\n", ThisTask);
+     
+  }
+  else
+  {
+ 
+    if (NTask > max_processors)
+    {
+      NTask = max_processors;
+    }  
+#endif
+ 
   status = init();
   if (status == EXIT_FAILURE)
   {
+#ifdef MPI
+    MPI_Abort(MPI_COMM_WORLD, 1);
+#else
     exit(EXIT_FAILURE);
+#endif
   }
  
   // The logic flow of the Kali linker is different to others. //
@@ -861,7 +929,11 @@ int32_t main(int argc, char **argv)
 
   if (status == EXIT_FAILURE)
   {
+#ifdef MPI
+    MPI_Abort(MPI_COMM_WORLD, 1);
+#else
     exit(EXIT_FAILURE);
+#endif
   }
  
   printf("Read in %ld FoF IDs now sorting them\n", N_fof_ids_ThisTask);   
@@ -882,7 +954,11 @@ int32_t main(int argc, char **argv)
     if (snapshot_particles_local == NULL)
     {
       fprintf(stderr, "Could not allocate memory for local snapshot particles for file number %d\n", snapshot_file_idx);
+#ifdef MPI
+      MPI_Abort(MPI_COMM_WORLD, 1);
+#else
       exit(EXIT_FAILURE);
+#endif
     }
 
     printf("I am Task %d and I am reading from snapshot file %d\n", ThisTask, snapshot_file_idx);
@@ -895,7 +971,11 @@ int32_t main(int argc, char **argv)
     if (matched_particles == NULL)
     {
       fprintf(stderr, "Could not allocate memory for the matched particles\n"); 
+#ifdef MPI
+      MPI_Abort(MPI_COMM_WORLD, 1);
+#else
       exit(EXIT_FAILURE);
+#endif
     }
 
     for (i = 0; i < 6; ++i)
@@ -912,7 +992,11 @@ int32_t main(int argc, char **argv)
 
     if (status == EXIT_FAILURE)
     {
+#ifdef MPI
+      MPI_Abort(MPI_COMM_WORLD, 1);
+#else
       exit(EXIT_FAILURE);
+#endif
     }
    
     free_localparticles(&snapshot_particles_local);      
@@ -923,6 +1007,24 @@ int32_t main(int argc, char **argv)
   free(fin_ids);
   free(fin_snapshot);
   free(foutbase); 
- 
+
+
+#ifdef ADJUST_PROCESSORS 
+  }
+  MPI_Barrier(MPI_COMM_WORLD);
+#endif
+
+/*
+  status = do_final_check(N_matched_AllSnap, N_fof_ids_ThisTask);
+  if (status == EXIT_FAILURE)
+  {
+#ifdef MPI
+      MPI_Abort(MPI_COMM_WORLD, 1);
+#else
+      exit(EXIT_FAILURE);
+#endif
+  }
+*/
+  printf("I am Task %d and I'm all done and leaving!\n", ThisTask); 
   return EXIT_SUCCESS;
 } 

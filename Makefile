@@ -27,7 +27,7 @@ GSL_LIBDIR := $(GSL_DIR)/lib
 HDF5INCL := -I/usr/local/x86_64/gnu/hdf5-1.8.17-openmpi-1.10.2-psm/include
 HDF5LIB := -L/usr/local/x86_64/gnu/hdf5-1.8.17-openmpi-1.10.2-psm/lib
 
-OPTIMIZE = -g -O0 -Wall # optimization and warning flags
+OPTIMIZE = -g -O0 -Wall -Werror # optimization and warning flags
 
 LIBS   += -g -lm  $(GSL_LIBS) -lgsl -lgslcblas 
 
