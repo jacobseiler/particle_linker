@@ -78,13 +78,13 @@ int32_t parse_params(int32_t argc, char **argv)
 {
 
   char check_fof[1024], check_snapshot[1024], check_logfile[1024];
-  int32_t snapnum;
+  int32_t snapnum, force_calculation;
 
-  if (argc != 5)
+  if (argc != 6)
   {
     fprintf(stderr, "This is the version of the particle linker that will link the FoF particles for the Kali simulation.\n");
-    fprintf(stderr, "Usage : ./kali_linker <FoF IDs Base> <Kali Snapshot Base> <Output Base> <Snapshot Number>\n"); 
-
+    fprintf(stderr, "Usage : ./kali_linker <FoF IDs Base> <Kali Snapshot Base> <Output Base> <Snapshot Number> <Force Calculation>\n"); 
+    fprintf(stderr, "Since we check to see if a calculation has been done before (using the size of the log file as an indicator), <Force Calculation> = 1 will ignore this check and will do the linking regardless.");
     return EXIT_FAILURE; 
   }
 
@@ -115,8 +115,21 @@ int32_t parse_params(int32_t argc, char **argv)
 
 
   foutbase = strdup(argv[3]); 
-
   snapnum = atoi(argv[4]);
+
+  if (snapnum < 0 || snapnum > 98) 
+  {
+    fprintf(stderr, "The Kali snapshots range from 0 to 98.  You entered %d as the snapnum.\n", snapnum);
+    return EXIT_FAILURE;
+  }
+  
+  force_calculation = atoi(argv[5]);
+  
+  if ((force_calculation < 0) || (force_calculation > 1))
+  {
+    fprintf(stderr, "Force calculation can only be 0 or 1.  You entered %d\n", force_calculation);
+    return EXIT_FAILURE;
+  }
 
   snprintf(check_logfile, 1024, "%s/logfiles/kali_%03d.log", "/lustre/projects/p134_swin/jseiler/kali/pseudo_snapshots/", snapnum); 
 
@@ -135,8 +148,15 @@ int32_t parse_params(int32_t argc, char **argv)
   
     if (file_size > 320.0 * 1024.0 && file_size < 360.0 * 1024.0)
     {
-      fprintf(stderr, "The logfile has a size %.4f KB meaning that it has already been matched. Exiting.\n", file_size / 1024.0);
-      return EXIT_FAILURE;
+      fprintf(stderr, "The logfile has a size %.4f KB meaning that it has already been matched.\n", file_size / 1024.0);
+      if (force_calculation == 1)
+      {
+        fprintf(stderr, "However we are forcing the calculation to be done anyway.\n");
+      }
+      else
+      {
+        return EXIT_FAILURE;
+      }
     }
   } 
 
